@@ -108,6 +108,8 @@ public class DebugBridgeSession : IDisposable
     // device's exception notifications. Negative like the other synthetic ids (-1/-100 step, -2 entry point)
     // so it is never mistaken for a user breakpoint; the fixed id lets toggling replace it in place.
     private const short ExceptionBreakpointId = -3;
+    // One-off entry that stops a freshly restarted CLR once its assemblies are loaded
+    private const short AssembliesLoadedBreakpointId = -4;
     // System.Exception field slots on the device (Library_corlib_native_System_Exception::FIELD___message)
     private const uint ExceptionMessageField = 1;
     private bool _breakOnAllExceptions;
@@ -777,14 +779,15 @@ public class DebugBridgeSession : IDisposable
                 return false;
             }
 
-            // Find the first frame with source location (user code)
-            // Use TryGetSourceLocationForFrame which works with both pdbx files and Portable PDBs
+            // Find the innermost frame with source location (user code). m_data runs outermost first and the
+            // device depth of a frame is its index. Use TryGetSourceLocationForFrame which works with both
+            // pdbx files and Portable PDBs
             WPCommands.Debugging_Thread_Stack.Reply.Call? userFrame = null;
             string? assemblyName = null;
             int userFrameDepth = -1;
             SourceLocation? currentLocation = null;
             
-            for (int i = 0; i < stack.m_data.Length; i++)
+            for (int i = stack.m_data.Length - 1; i >= 0; i--)
             {
                 var frame = stack.m_data[i];
                 var methodName = _engine.GetMethodName(frame.m_md, true);
@@ -807,7 +810,7 @@ public class DebugBridgeSession : IDisposable
             {
                 // No user code found, just resume with a simple step
                 LogDebug("No frame with source found, using simple step");
-                return await PerformDeviceStepOver(pid, stack.m_data[0], 0);
+                return await PerformDeviceStepOver(pid, stack.m_data[^1], (uint)stack.m_data.Length - 1);
             }
             
             LogDebug($"User frame at depth {userFrameDepth}: md=0x{userFrame.m_md:X8}, IP=0x{userFrame.m_IP:X4}");
@@ -918,7 +921,7 @@ public class DebugBridgeSession : IDisposable
                 return true;
             }
             
-            var frame = stack.m_data[0];
+            var frame = stack.m_data[^1];
             uint currentDepth = (uint)stack.m_data.Length - 1;
             
             LogDebug($"Setting step: IL=0x{frame.m_IP:X4}, md=0x{frame.m_md:X8}, depth={currentDepth}");
@@ -947,7 +950,7 @@ public class DebugBridgeSession : IDisposable
                 {
                     m_id = -1,  // Temporary step breakpoint
                     m_flags = (ushort)WPCommands.Debugging_Execution_BreakpointDef.c_HARD,
-                    m_pid = 0,  // All threads
+                    m_pid = WPCommands.Debugging_Execution_BreakpointDef.c_PID_ANY,  // All threads (0 matches no thread on the device)
                     m_depth = 0,
                     m_md = frame.m_md,
                     m_IP = rangeEnd  // Set BP at start of next source line
@@ -1068,7 +1071,7 @@ public class DebugBridgeSession : IDisposable
                 }
             }
             
-            var newFrame = newStack.m_data[0];
+            var newFrame = newStack.m_data[^1];
             uint newDepth = (uint)newStack.m_data.Length - 1;
             
             // Get new source location
@@ -1312,7 +1315,7 @@ public class DebugBridgeSession : IDisposable
                     break;
                 }
                 
-                var frame = stack.m_data[0];
+                var frame = stack.m_data[^1];
                 
                 var stepBp = new WPCommands.Debugging_Execution_BreakpointDef
                 {
@@ -1415,7 +1418,7 @@ public class DebugBridgeSession : IDisposable
                 }
             }
             
-            var newFrame = newStack.m_data[0];
+            var newFrame = newStack.m_data[^1];
             // Use TryGetSourceLocationForFrame which searches all loaded assemblies (works with Portable PDBs)
             var (newLocation, _) = TryGetSourceLocationForFrame(newFrame.m_md, newFrame.m_IP);
             int newLine = newLocation?.Line ?? -1;
@@ -1474,7 +1477,7 @@ public class DebugBridgeSession : IDisposable
                         {
                             m_id = -100, // Special ID for step breakpoint
                             m_flags = WPCommands.Debugging_Execution_BreakpointDef.c_HARD,
-                            m_pid = 0,
+                            m_pid = WPCommands.Debugging_Execution_BreakpointDef.c_PID_ANY,
                             m_depth = 0,
                             m_md = (deviceAssemblyIndex.Value << 16) | ((uint)nextLineLocation.MethodToken & 0xFFFF),
                             m_IP = (uint)nextLineLocation.ILOffset,
@@ -1528,7 +1531,7 @@ public class DebugBridgeSession : IDisposable
                                 var checkStack = _engine.GetThreadStack(pid);
                                 if (checkStack?.m_data != null && checkStack.m_data.Length > 0)
                                 {
-                                    var checkFrame = checkStack.m_data[0];
+                                    var checkFrame = checkStack.m_data[^1];
                                     var userBp = _activeBreakpointDefs.FirstOrDefault(bp => 
                                         bp.m_IP == checkFrame.m_IP && bp.m_md == checkFrame.m_md);
                                     
@@ -1679,8 +1682,8 @@ public class DebugBridgeSession : IDisposable
                         return (true, false, 0, false);
                     }
                     
-                    uint currentIP = stack.m_data[0].m_IP;
-                    uint currentMd = stack.m_data[0].m_md;
+                    uint currentIP = stack.m_data[^1].m_IP;
+                    uint currentMd = stack.m_data[^1].m_md;
                     
                     // Check if we've actually moved
                     bool hasMoved = (currentIP != startingIP) || (currentMd != startingMd);
@@ -1850,7 +1853,7 @@ public class DebugBridgeSession : IDisposable
             {
                 m_id = (short)tempBpId,
                 m_flags = WPCommands.Debugging_Execution_BreakpointDef.c_HARD,
-                m_pid = 0, // Any thread
+                m_pid = WPCommands.Debugging_Execution_BreakpointDef.c_PID_ANY, // Any thread (0 matches no thread on the device)
                 m_depth = 0,
                 m_md = methodToken,
                 m_IP = target.ILOffset
@@ -1974,7 +1977,7 @@ public class DebugBridgeSession : IDisposable
         {
             m_id = (short)tempBpId,
             m_flags = WPCommands.Debugging_Execution_BreakpointDef.c_HARD,
-            m_pid = 0, // Any thread
+            m_pid = WPCommands.Debugging_Execution_BreakpointDef.c_PID_ANY, // Any thread (0 matches no thread on the device)
             m_depth = 0,
             m_md = methodToken,
             m_IP = ilOffset
@@ -2236,10 +2239,11 @@ public class DebugBridgeSession : IDisposable
                 return false;
             }
 
-            // Find the first frame that has source (user code)
+            // Find the innermost frame that has source (user code); its index in m_data is its device depth
             WPCommands.Debugging_Thread_Stack.Reply.Call? targetFrame = null;
+            uint targetDepth = (uint)stack.m_data.Length - 1;
             
-            for (int i = 0; i < stack.m_data.Length; i++)
+            for (int i = stack.m_data.Length - 1; i >= 0; i--)
             {
                 var frame = stack.m_data[i];
                 var (location, _) = TryGetSourceLocationForFrame(frame.m_md, frame.m_IP);
@@ -2248,22 +2252,30 @@ public class DebugBridgeSession : IDisposable
                 if (hasSource)
                 {
                     targetFrame = frame;
+                    targetDepth = (uint)i;
                     break;
                 }
             }
             
             if (targetFrame == null)
             {
-                targetFrame = stack.m_data[0];
+                targetFrame = stack.m_data[^1];
             }
             
-            // Create step into breakpoint
+            // Create step into breakpoint. Like the VS extension's stepper: m_depth is the stepping frame's
+            // device depth, and step-in also steps over the rest of the line (when no call is made) and out
+            // of the method (when it returns), so it always lands on the next line that runs.
+            var lineRange = GetILRangeForCurrentIP(targetFrame.m_md, targetFrame.m_IP);
             var stepBp = new WPCommands.Debugging_Execution_BreakpointDef
             {
                 m_id = -1,
-                m_flags = WPCommands.Debugging_Execution_BreakpointDef.c_STEP_IN,
+                m_flags = (ushort)(WPCommands.Debugging_Execution_BreakpointDef.c_STEP_IN |
+                                   WPCommands.Debugging_Execution_BreakpointDef.c_STEP_OVER |
+                                   WPCommands.Debugging_Execution_BreakpointDef.c_STEP_OUT),
                 m_pid = pid,
-                m_depth = WPCommands.Debugging_Execution_BreakpointDef.c_DEPTH_STEP_CALL,
+                m_depth = targetDepth,
+                m_IPStart = lineRange?.startOffset ?? 0,
+                m_IPEnd = lineRange?.endOffset ?? 0,
                 m_md = targetFrame.m_md,
                 m_IP = targetFrame.m_IP
             };
@@ -2309,10 +2321,11 @@ public class DebugBridgeSession : IDisposable
                 return false;
             }
 
-            // Find the first frame that has source (user code)
+            // Find the innermost frame that has source (user code); its index in m_data is its device depth
             WPCommands.Debugging_Thread_Stack.Reply.Call? targetFrame = null;
+            uint targetDepth = (uint)stack.m_data.Length - 1;
             
-            for (int i = 0; i < stack.m_data.Length; i++)
+            for (int i = stack.m_data.Length - 1; i >= 0; i--)
             {
                 var frame = stack.m_data[i];
                 var (location, _) = TryGetSourceLocationForFrame(frame.m_md, frame.m_IP);
@@ -2321,13 +2334,14 @@ public class DebugBridgeSession : IDisposable
                 if (hasSource)
                 {
                     targetFrame = frame;
+                    targetDepth = (uint)i;
                     break;
                 }
             }
             
             if (targetFrame == null)
             {
-                targetFrame = stack.m_data[0];
+                targetFrame = stack.m_data[^1];
             }
             
             // Create step out breakpoint
@@ -2336,7 +2350,8 @@ public class DebugBridgeSession : IDisposable
                 m_id = -1,
                 m_flags = WPCommands.Debugging_Execution_BreakpointDef.c_STEP_OUT,
                 m_pid = pid,
-                m_depth = WPCommands.Debugging_Execution_BreakpointDef.c_DEPTH_STEP_RETURN,
+                // the device stops when a frame at or above this depth returns
+                m_depth = targetDepth,
                 m_md = targetFrame.m_md,
                 m_IP = targetFrame.m_IP
             };
@@ -4114,6 +4129,13 @@ public class DebugBridgeSession : IDisposable
             LogDebug("Re-enabling source-level debugging...");
             _engine.UpdateDebugFlags();
             
+            // The CLR restarts with WaitForDebugger and holds before loading the deployed assemblies, so there is
+            // nothing to bind breakpoints against yet. Let it run just until they are loaded.
+            if (_engine.ResolveAllAssemblies() is not { Count: > 0 })
+            {
+                await RunUntilAssembliesLoaded();
+            }
+
             // Query device assemblies again after reboot
             await QueryDeviceAssemblies();
             
@@ -4691,6 +4713,42 @@ public class DebugBridgeSession : IDisposable
     /// This is necessary because after deployment and CLR reboot, the assembly indices change
     /// and breakpoints need to be re-created with the correct indices.
     /// </summary>
+    /// <summary>
+    /// Resume a CLR held at startup until it has loaded its assemblies. As the VS extension does, a
+    /// c_ASSEMBLIES_LOADED breakpoint stops it once they are loaded and before any user code runs.
+    /// </summary>
+    private async Task RunUntilAssembliesLoaded()
+    {
+        var assembliesLoadedBp = new WPCommands.Debugging_Execution_BreakpointDef
+        {
+            m_id = AssembliesLoadedBreakpointId,
+            m_flags = WPCommands.Debugging_Execution_BreakpointDef.c_ASSEMBLIES_LOADED,
+            m_pid = WPCommands.Debugging_Execution_BreakpointDef.c_PID_ANY
+        };
+
+        var breakpoints = _activeBreakpointDefs.ToList();
+        breakpoints.Add(assembliesLoadedBp);
+        _engine!.SetBreakpoints(breakpoints.ToArray());
+
+        LogDebug("Running CLR until assemblies are loaded...");
+        _engine.ResumeExecution();
+
+        for (int attempt = 0; attempt < 100; attempt++)
+        {
+            await Task.Delay(100);
+
+            if ((_engine.GetExecutionMode() & WPCommands.DebuggingExecutionChangeConditions.State.Stopped) != 0)
+            {
+                var status = _engine.GetBreakpointStatus();
+                LogDebug($"CLR stopped after resume: id={status?.m_id}, flags=0x{status?.m_flags:X4}");
+                break;
+            }
+        }
+
+        // Drop the one-off assemblies-loaded entry again
+        _engine.SetBreakpoints(_activeBreakpointDefs.ToArray());
+    }
+
     private async Task ReapplyBreakpointsAfterReboot()
     {
         if (_engine == null)
