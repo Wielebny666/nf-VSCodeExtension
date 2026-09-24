@@ -5418,7 +5418,7 @@ public class DebugBridgeSession : IDisposable
     /// <summary>
     /// Reboot the device
     /// </summary>
-    public async Task<bool> Reboot(bool clrOnly)
+    public async Task<bool> Reboot(bool clrOnly, bool waitForDebugger)
     {
         if (!_isConnected || _engine == null)
         {
@@ -5427,16 +5427,21 @@ public class DebugBridgeSession : IDisposable
 
         try
         {
-            LogDebug($"Rebooting device (CLR only: {clrOnly})");
-            
-            var rebootOption = clrOnly 
-                ? RebootOptions.ClrOnly 
+            LogDebug($"Rebooting device (CLR only: {clrOnly}, wait for debugger: {waitForDebugger})");
+
+            var rebootOption = clrOnly
+                ? RebootOptions.ClrOnly
                 : RebootOptions.NormalReboot;
-                
-            _engine.RebootDevice(rebootOption);
-            
+            if (waitForDebugger)
+            {
+                rebootOption |= RebootOptions.WaitForDebugger;
+            }
+
+            bool rebooted = _engine.RebootDevice(rebootOption);
+            LogDebug($"RebootDevice returned: {rebooted}");
+
             await Task.CompletedTask;
-            return true;
+            return rebooted;
         }
         catch (Exception ex)
         {

@@ -198,6 +198,14 @@ export class NanoBridge extends EventEmitter {
     }
 
     /**
+     * Reboot the device (or only its CLR)
+     */
+    public async reboot(clrOnly: boolean, waitForDebugger: boolean): Promise<boolean> {
+        const response = await this.sendCommand('reboot', { clrOnly, waitForDebugger });
+        return response?.success || false;
+    }
+
+    /**
      * Set a breakpoint
      */
     public async setBreakpoint(path: string, line: number, id: number): Promise<boolean> {

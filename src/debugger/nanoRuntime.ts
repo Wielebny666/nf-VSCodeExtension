@@ -589,6 +589,16 @@ export class NanoRuntime extends EventEmitter {
     }
 
     /**
+     * Restart the app from the beginning, halted until a debugger resumes it
+     */
+    public async restartClr(): Promise<boolean> {
+        this.log('Restarting CLR (wait for debugger)');
+        const rebooted = await this._bridge.reboot(true, true);
+        this.log(`CLR restart ${rebooted ? 'requested' : 'failed'}`);
+        return rebooted;
+    }
+
+    /**
      * Disconnect from the device
      */
     public async disconnect(terminateDebuggee: boolean): Promise<void> {

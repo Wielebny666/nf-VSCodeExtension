@@ -249,6 +249,12 @@ public class RebootArgs
     /// </summary>
     [JsonPropertyName("clrOnly")]
     public bool ClrOnly { get; set; }
+
+    /// <summary>
+    /// If true, the CLR halts before running the app until a debugger resumes it
+    /// </summary>
+    [JsonPropertyName("waitForDebugger")]
+    public bool WaitForDebugger { get; set; }
 }
 
 /// <summary>

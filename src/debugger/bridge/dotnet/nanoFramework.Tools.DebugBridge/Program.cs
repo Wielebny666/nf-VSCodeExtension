@@ -587,7 +587,7 @@ class Program
         }
 
         var args = JsonSerializer.Deserialize<RebootArgs>(request.Args?.ToString() ?? "{}", _jsonOptions);
-        var result = await _session.Reboot(args?.ClrOnly ?? false);
+        var result = await _session.Reboot(args?.ClrOnly ?? false, args?.WaitForDebugger ?? false);
         return new BridgeResponse { Id = request.Id, Success = result };
     }
 

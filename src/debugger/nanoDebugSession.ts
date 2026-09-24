@@ -604,6 +604,10 @@ export class NanoDebugSession extends LoggingDebugSession {
      * Disconnect request
      */
     protected async disconnectRequest(response: DebugProtocol.DisconnectResponse, args: DebugProtocol.DisconnectArguments): Promise<void> {
+        // VS Code restarts an attach session as disconnect(restart) + a new attach, which alone never restarts the app.
+        if (args.restart && this._isAttach) {
+            await this._runtime.restartClr();
+        }
         await this._runtime.disconnect(args.terminateDebuggee || false);
         this.sendResponse(response);
     }
