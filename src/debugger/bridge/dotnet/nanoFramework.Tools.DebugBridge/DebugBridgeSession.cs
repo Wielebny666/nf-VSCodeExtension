@@ -2388,7 +2388,7 @@ public class DebugBridgeSession : IDisposable
                     string threadName;
                     if (stack != null && stack.m_data != null && stack.m_data.Length > 0)
                     {
-                        // Try to get method name for top frame
+                        // Name the thread after its entry method (m_data[0] is the outermost frame)
                         var topFrame = stack.m_data[0];
                         var methodName = _engine.GetMethodName(topFrame.m_md, false);
                         threadName = !string.IsNullOrEmpty(methodName) 
@@ -2454,8 +2454,12 @@ public class DebugBridgeSession : IDisposable
                 
                 LogDebug($"Stack has {stack.m_data.Length} frames, returning {startFrame} to {endFrame}");
                 
-                for (int i = startFrame; i < endFrame; i++)
+                // The device lists frames outermost first (m_data[0] is the thread's entry method) and numbers
+                // the depth used by the value/stack commands the same way, while DAP wants the innermost frame
+                // first: walk m_data backwards and keep the device index as the frame's depth.
+                for (int displayIndex = startFrame; displayIndex < endFrame; displayIndex++)
                 {
+                    int i = stack.m_data.Length - 1 - displayIndex;
                     var frame = stack.m_data[i];
                     var frameId = _nextFrameId++;
                     
