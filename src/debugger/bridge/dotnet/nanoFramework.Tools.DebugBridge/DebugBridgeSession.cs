@@ -110,6 +110,8 @@ public class DebugBridgeSession : IDisposable
     private const short ExceptionBreakpointId = -3;
     // One-off entry that stops a freshly restarted CLR once its assemblies are loaded
     private const short AssembliesLoadedBreakpointId = -4;
+    // Safety cap for draining the device's breakpoint hit queue (it holds five entries)
+    private const int MaxBreakpointQueueReads = 16;
     // System.Exception field slots on the device (Library_corlib_native_System_Exception::FIELD___message)
     private const uint ExceptionMessageField = 1;
     private bool _breakOnAllExceptions;
@@ -550,7 +552,7 @@ public class DebugBridgeSession : IDisposable
             _breakpointPollCts = new CancellationTokenSource();
             
             // Resume execution using Wire Protocol
-            bool success = _engine.ResumeExecution();
+            bool success = ResumeDevice();
             
             if (success)
             {
@@ -593,17 +595,22 @@ public class DebugBridgeSession : IDisposable
             {
                 LogDebug("Device still stopped after resume - checking for breakpoint hit");
                 
-                var bpStatus = _engine.GetBreakpointStatus();
-
-                // Reading the status dequeues the hit, so an exception hit has to be handled here rather than
-                // left for the poll loop below; if it isn't a stage to stop on, the device was resumed and
-                // the loop keeps polling.
-                if (bpStatus != null && IsExceptionHit(bpStatus) && ReportOrSkipExceptionHit(bpStatus))
+                // Reading the status dequeues the hits, so they have to be handled here rather than left for
+                // the poll loop below; if only exception stages nobody asked for were queued, resume and let the
+                // loop keep polling.
+                var hits = DrainBreakpointStatus();
+                if (ReportExceptionHits(hits))
                 {
                     return;
                 }
 
-                if (bpStatus != null && bpStatus.m_id > 0)
+                if (HasOnlySkippedExceptionHits(hits))
+                {
+                    ResumeDevice();
+                }
+
+                var bpStatus = SelectHit(hits, hit => hit.m_id > 0);
+                if (bpStatus.m_id > 0)
                 {
                     LogDebug($"Immediate breakpoint hit: id={bpStatus.m_id}, md=0x{bpStatus.m_md:X8}, IP=0x{bpStatus.m_IP:X4}");
                     
@@ -640,16 +647,19 @@ public class DebugBridgeSession : IDisposable
                     LogDebug($"Device stopped (state={state}) - checking breakpoint status");
                     
                     // Check what caused the stop
-                    var bpStatus = _engine.GetBreakpointStatus();
-                    if (bpStatus != null && IsExceptionHit(bpStatus))
+                    var hits = DrainBreakpointStatus();
+                    if (ReportExceptionHits(hits))
                     {
-                        if (ReportOrSkipExceptionHit(bpStatus))
-                        {
-                            return;
-                        }
-                    
+                        return;
+                    }
+
+                    if (HasOnlySkippedExceptionHits(hits))
+                    {
+                        ResumeDevice();
                         continue;
                     }
+
+                    var bpStatus = SelectHit(hits, hit => hit.m_id > 0);
                     
                     
                     if (bpStatus != null)
@@ -940,7 +950,7 @@ public class DebugBridgeSession : IDisposable
                 await Task.Delay(250);
                 
                 LogDebug("Resuming execution (existing BP will catch)...");
-                _engine.ResumeExecution();
+                ResumeDevice();
             }
             else
             {
@@ -971,7 +981,7 @@ public class DebugBridgeSession : IDisposable
                 
                 // Resume execution
                 LogDebug("Resuming execution...");
-                _engine.ResumeExecution();
+                ResumeDevice();
             }
             
             // Wait for device to stop
@@ -1162,7 +1172,7 @@ public class DebugBridgeSession : IDisposable
             };
             
             _engine.SetBreakpoints(new[] { stepBp });
-            _engine.ResumeExecution();
+            ResumeDevice();
             
             // Wait for device to stop
             bool stopped = false;
@@ -1338,7 +1348,7 @@ public class DebugBridgeSession : IDisposable
                 await Task.Delay(50);
                 
                 // Resume execution
-                _engine.ResumeExecution();
+                ResumeDevice();
                 
                 // Wait for step to complete (IL-level)
                 // Pass starting IP/method so we can detect if we've actually moved before reporting a breakpoint hit
@@ -1502,7 +1512,7 @@ public class DebugBridgeSession : IDisposable
                         }
                         
                         // Resume execution (not step!)
-                        _engine.ResumeExecution();
+                        ResumeDevice();
                         
                         // Wait for stop (with longer timeout for real execution)
                         for (int waitCount = 0; waitCount < 300; waitCount++) // Up to 30 seconds
@@ -1754,16 +1764,19 @@ public class DebugBridgeSession : IDisposable
             
             if (isStopped)
             {
-                var bpStatus = _engine.GetBreakpointStatus();
-                if (bpStatus != null && IsExceptionHit(bpStatus))
+                var hits = DrainBreakpointStatus();
+                if (ReportExceptionHits(hits))
                 {
-                    if (ReportOrSkipExceptionHit(bpStatus))
-                    {
-                        return;
-                    }
-                
+                    return;
+                }
+
+                if (HasOnlySkippedExceptionHits(hits))
+                {
+                    ResumeDevice();
                     continue;
                 }
+
+                var bpStatus = SelectHit(hits, hit => (hit.m_flags & WPCommands.Debugging_Execution_BreakpointDef.c_STEP) != 0 || (hit.m_id > 0 && _activeBreakpointDefs.Any(bp => bp.m_id == hit.m_id)));
                 
                 if (bpStatus != null)
                 {
@@ -1868,7 +1881,7 @@ public class DebugBridgeSession : IDisposable
         _engine.SetBreakpoints(allBreakpoints.ToArray());
         
         // Resume execution
-        _engine.ResumeExecution();
+        ResumeDevice();
         
         // Wait for any breakpoint hit - pass target offsets so we can recognize step complete
         await WaitForStepTargetHit(pid, tempBreakpointIds, targetILOffsets);
@@ -1895,16 +1908,19 @@ public class DebugBridgeSession : IDisposable
             
             if (isStopped)
             {
-                var bpStatus = _engine.GetBreakpointStatus();
-                if (bpStatus != null && IsExceptionHit(bpStatus))
+                var hits = DrainBreakpointStatus();
+                if (ReportExceptionHits(hits))
                 {
-                    if (ReportOrSkipExceptionHit(bpStatus))
-                    {
-                        return;
-                    }
-                
+                    return;
+                }
+
+                if (HasOnlySkippedExceptionHits(hits))
+                {
+                    ResumeDevice();
                     continue;
                 }
+
+                var bpStatus = SelectHit(hits, hit => targetILOffsets.Contains(hit.m_IP) || (hit.m_id > 0 && _activeBreakpointDefs.Any(bp => bp.m_id == hit.m_id)));
                 
                 if (bpStatus != null)
                 {
@@ -1991,7 +2007,7 @@ public class DebugBridgeSession : IDisposable
         _engine.SetBreakpoints(allBreakpoints.ToArray());
         
         // Resume execution
-        _engine.ResumeExecution();
+        ResumeDevice();
         
         // Wait for breakpoint hit
         await WaitForBreakpointHit(pid, tempBpId);
@@ -2025,7 +2041,7 @@ public class DebugBridgeSession : IDisposable
         allBreakpoints.Add(stepBp);
         _engine.SetBreakpoints(allBreakpoints.ToArray());
         
-        _engine.ResumeExecution();
+        ResumeDevice();
         
         await WaitForStepComplete(pid);
         
@@ -2046,16 +2062,19 @@ public class DebugBridgeSession : IDisposable
             
             if (isStopped)
             {
-                var bpStatus = _engine.GetBreakpointStatus();
-                if (bpStatus != null && IsExceptionHit(bpStatus))
+                var hits = DrainBreakpointStatus();
+                if (ReportExceptionHits(hits))
                 {
-                    if (ReportOrSkipExceptionHit(bpStatus))
-                    {
-                        return;
-                    }
-                
+                    return;
+                }
+
+                if (HasOnlySkippedExceptionHits(hits))
+                {
+                    ResumeDevice();
                     continue;
                 }
+
+                var bpStatus = SelectHit(hits, hit => hit.m_id == targetBpId || (hit.m_id > 0 && _activeBreakpointDefs.Any(bp => bp.m_id == hit.m_id)));
                 
                 if (bpStatus != null)
                 {
@@ -2147,16 +2166,19 @@ public class DebugBridgeSession : IDisposable
             if (isStopped)
             {
                 // Check if we hit the step breakpoint
-                var bpStatus = _engine.GetBreakpointStatus();
-                if (bpStatus != null && IsExceptionHit(bpStatus))
+                var hits = DrainBreakpointStatus();
+                if (ReportExceptionHits(hits))
                 {
-                    if (ReportOrSkipExceptionHit(bpStatus))
-                    {
-                        return;
-                    }
-                
+                    return;
+                }
+
+                if (HasOnlySkippedExceptionHits(hits))
+                {
+                    ResumeDevice();
                     continue;
                 }
+
+                var bpStatus = SelectHit(hits, hit => hit.m_id == -1 || (hit.m_flags & WPCommands.Debugging_Execution_BreakpointDef.c_STEP) != 0 || hit.m_id > 0);
                 
                 if (bpStatus != null)
                 {
@@ -2284,7 +2306,7 @@ public class DebugBridgeSession : IDisposable
             allBreakpoints.Add(stepBp);
             _engine.SetBreakpoints(allBreakpoints.ToArray());
             
-            _engine.ResumeExecution();
+            ResumeDevice();
             
             // Wait for step to complete
             await WaitForStepComplete(pid);
@@ -2360,7 +2382,7 @@ public class DebugBridgeSession : IDisposable
             allBreakpoints.Add(stepBp);
             _engine.SetBreakpoints(allBreakpoints.ToArray());
             
-            _engine.ResumeExecution();
+            ResumeDevice();
             
             // Wait for step to complete
             await WaitForStepComplete(pid);
@@ -4230,7 +4252,7 @@ public class DebugBridgeSession : IDisposable
                 
                 // Resume execution so the program can start and hit the entry point
                 LogDebug("Resuming execution to hit entry point...");
-                _engine.ResumeExecution();
+                ResumeDevice();
                 
                 // Wait for the entry point breakpoint to be hit
                 await WaitForEntryPointHit(entryPointBp);
@@ -4239,7 +4261,7 @@ public class DebugBridgeSession : IDisposable
             {
                 // Resume execution and set up breakpoint polling
                 LogDebug("Resuming execution...");
-                _engine.ResumeExecution();
+                ResumeDevice();
                 
                 // Cancel any existing polling task and start a new one
                 _breakpointPollCts?.Cancel();
@@ -4357,16 +4379,19 @@ public class DebugBridgeSession : IDisposable
                 LogDebug($"Thread list: [{string.Join(", ", _lastThreadList ?? Array.Empty<uint>())}], using {_stoppedThreadId}");
                 
                 // Check if we hit the entry point breakpoint or a user breakpoint
-                var bpStatus = _engine.GetBreakpointStatus();
-                if (bpStatus != null && IsExceptionHit(bpStatus))
+                var hits = DrainBreakpointStatus();
+                if (ReportExceptionHits(hits))
                 {
-                    if (ReportOrSkipExceptionHit(bpStatus))
-                    {
-                        return;
-                    }
-                
+                    return;
+                }
+
+                if (HasOnlySkippedExceptionHits(hits))
+                {
+                    ResumeDevice();
                     continue;
                 }
+
+                var bpStatus = SelectHit(hits, hit => hit.m_id == -2 || hit.m_id > 0);
                 
                 if (bpStatus != null)
                 {
@@ -4799,7 +4824,7 @@ public class DebugBridgeSession : IDisposable
         _engine!.SetBreakpoints(breakpoints.ToArray());
 
         LogDebug("Running CLR until assemblies are loaded...");
-        _engine.ResumeExecution();
+        ResumeDevice();
 
         for (int attempt = 0; attempt < 100; attempt++)
         {
@@ -4807,8 +4832,8 @@ public class DebugBridgeSession : IDisposable
 
             if ((_engine.GetExecutionMode() & WPCommands.DebuggingExecutionChangeConditions.State.Stopped) != 0)
             {
-                var status = _engine.GetBreakpointStatus();
-                LogDebug($"CLR stopped after resume: id={status?.m_id}, flags=0x{status?.m_flags:X4}");
+                var status = SelectHit(DrainBreakpointStatus(), hit => (hit.m_flags & WPCommands.Debugging_Execution_BreakpointDef.c_ASSEMBLIES_LOADED) != 0);
+                LogDebug($"CLR stopped after resume: id={status.m_id}, flags=0x{status.m_flags:X4}");
                 break;
             }
         }
@@ -5182,27 +5207,38 @@ public class DebugBridgeSession : IDisposable
     }
 
     /// <summary>
-    /// Handle a stop caused by the exception breakpoint entry: report it to VS Code when it is a stage the
-    /// user asked to break on, otherwise resume the device.
+    /// Report the latest exception hit among <paramref name="hits"/> that is a stage the user asked to break on.
     /// </summary>
-    /// <returns>True if a stopped event was raised, false if execution was resumed.</returns>
-    private bool ReportOrSkipExceptionHit(WPCommands.Debugging_Execution_BreakpointDef bpStatus)
+    /// <returns>True if a stopped event was raised.</returns>
+    private bool ReportExceptionHits(List<WPCommands.Debugging_Execution_BreakpointDef> hits)
     {
-        LogDebug($"Exception hit: flags=0x{bpStatus.m_flags:X4}, depthExceptionHandler=0x{bpStatus.m_depthExceptionHandler:X8}, pid={bpStatus.m_pid}");
+        WPCommands.Debugging_Execution_BreakpointDef? toReport = null;
 
-        if (!ShouldStopOnException(bpStatus))
+        foreach (var hit in hits.Where(IsExceptionHit))
         {
-            LogDebug("Exception stage not requested, resuming");
-            _engine!.ResumeExecution();
+            LogDebug($"Exception hit: flags=0x{hit.m_flags:X4}, depthExceptionHandler=0x{hit.m_depthExceptionHandler:X8}, pid={hit.m_pid}");
+
+            if (ShouldStopOnException(hit))
+            {
+                toReport = hit;
+            }
+            else
+            {
+                LogDebug("Exception stage not requested, not stopping for it");
+            }
+        }
+
+        if (toReport == null)
+        {
             return false;
         }
 
         _lastThreadList = _engine!.GetThreadList();
-        _stoppedThreadId = bpStatus.m_pid != 0
-            ? bpStatus.m_pid
+        _stoppedThreadId = toReport.m_pid != 0
+            ? toReport.m_pid
             : (_lastThreadList?.FirstOrDefault() ?? 1u);
 
-        bool uncaught = bpStatus.m_depthExceptionHandler == WPCommands.Debugging_Execution_BreakpointDef.c_DEPTH_UNCAUGHT;
+        bool uncaught = toReport.m_depthExceptionHandler == WPCommands.Debugging_Execution_BreakpointDef.c_DEPTH_UNCAUGHT;
         _lastException = ReadExceptionInfo(_stoppedThreadId, uncaught);
 
         LogInfo($"{(uncaught ? "Uncaught" : "Thrown")} exception: {_lastException.Details?.FullTypeName}: {_lastException.Details?.Message}");
@@ -5217,6 +5253,83 @@ public class DebugBridgeSession : IDisposable
 
         return true;
     }
+
+    /// <summary>
+    /// True when the stop was caused only by exception stages nobody asked to break on, so the caller should
+    /// resume instead of reporting anything.
+    /// </summary>
+    private static bool HasOnlySkippedExceptionHits(List<WPCommands.Debugging_Execution_BreakpointDef> hits) =>
+        hits.Count > 0 && hits.All(IsExceptionHit);
+
+    /// <summary>
+    /// Read every entry from the device's breakpoint hit queue. The CLR queues up to five hits per stop, sends
+    /// BreakpointHit only when the queue goes from empty to one entry, and each BreakpointStatus request dequeues
+    /// a single entry, the last one flagged c_LAST_BREAKPOINT (an empty queue answers with an all-zero entry).
+    /// Unread entries would be reported on later stops and eventually fill the queue.
+    /// </summary>
+    /// <returns>The queued hits, oldest first, with c_LAST_BREAKPOINT cleared.</returns>
+    private List<WPCommands.Debugging_Execution_BreakpointDef> DrainBreakpointStatus()
+    {
+        var hits = new List<WPCommands.Debugging_Execution_BreakpointDef>();
+
+        for (int i = 0; i < MaxBreakpointQueueReads && _engine != null; i++)
+        {
+            var status = _engine.GetBreakpointStatus();
+            if (status == null || status.m_flags == 0)
+            {
+                break;
+            }
+
+            bool last = (status.m_flags & WPCommands.Debugging_Execution_BreakpointDef.c_LAST_BREAKPOINT) != 0;
+            status.m_flags = (ushort)(status.m_flags & ~WPCommands.Debugging_Execution_BreakpointDef.c_LAST_BREAKPOINT);
+            hits.Add(status);
+
+            if (last)
+            {
+                break;
+            }
+        }
+
+        if (hits.Count > 1)
+        {
+            LogDebug($"Drained {hits.Count} queued breakpoint hits: {string.Join(", ", hits.Select(DescribeHit))}");
+        }
+
+        return hits;
+    }
+
+    /// <summary>
+    /// Pick the hit to report: the most recent non-exception hit matching what the caller waits for, else the most
+    /// recent non-exception hit, else an all-zero entry (what the device answers when nothing is queued).
+    /// </summary>
+    private WPCommands.Debugging_Execution_BreakpointDef SelectHit(List<WPCommands.Debugging_Execution_BreakpointDef> hits, Func<WPCommands.Debugging_Execution_BreakpointDef, bool> wanted)
+    {
+        var candidates = hits.Where(hit => !IsExceptionHit(hit)).ToList();
+        var selected = candidates.LastOrDefault(wanted) ?? candidates.LastOrDefault() ?? new WPCommands.Debugging_Execution_BreakpointDef();
+
+        foreach (var hit in candidates.Where(hit => !ReferenceEquals(hit, selected)))
+        {
+            LogDebug($"Not reporting queued breakpoint hit: {DescribeHit(hit)}");
+        }
+
+        return selected;
+    }
+
+    /// <summary>
+    /// Resume the device with its breakpoint hit queue empty, so the next stop is announced and read fresh.
+    /// </summary>
+    private bool ResumeDevice()
+    {
+        foreach (var hit in DrainBreakpointStatus())
+        {
+            LogDebug($"Discarding unread breakpoint hit before resuming: {DescribeHit(hit)}");
+        }
+
+        return _engine!.ResumeExecution();
+    }
+
+    private static string DescribeHit(WPCommands.Debugging_Execution_BreakpointDef hit) =>
+        $"id={hit.m_id} flags=0x{hit.m_flags:X4} md=0x{hit.m_md:X8} IP=0x{hit.m_IP:X4} depth={hit.m_depth}";
 
     private ExceptionInfoResult ReadExceptionInfo(uint pid, bool uncaught)
     {
