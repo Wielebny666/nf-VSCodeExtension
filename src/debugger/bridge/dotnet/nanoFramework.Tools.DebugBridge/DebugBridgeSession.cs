@@ -3508,6 +3508,67 @@ public class DebugBridgeSession : IDisposable
         return fallbackName;
     }
 
+    private EvaluateResult? TryEvaluateConstant(string expression, int? frameId)
+    {
+        // "SlotCount" or "Program.SlotCount"
+        int dot = expression.LastIndexOf('.');
+        string fieldName = dot >= 0 ? expression[(dot + 1)..] : expression;
+        string? declaringType = dot >= 0 ? expression[..dot] : null;
+        string? frameAssembly = null;
+
+        if (frameId.HasValue && _frameIdMap.TryGetValue(frameId.Value, out var frame))
+        {
+            frameAssembly = frame.AssemblyName;
+
+            if (declaringType == null && _engine != null)
+            {
+                // Device method names are "Namespace.Type::Method"
+                var methodName = _engine.GetMethodName(frame.MethodToken, true);
+                int separator = methodName?.LastIndexOf("::", StringComparison.Ordinal) ?? -1;
+                declaringType = separator > 0 ? methodName![..separator] : null;
+            }
+        }
+
+        var assemblies = _symbolResolver.GetLoadedAssemblies().ToList();
+        if (frameAssembly != null)
+        {
+            assemblies.Remove(frameAssembly);
+            assemblies.Insert(0, frameAssembly);
+        }
+
+        foreach (var assembly in assemblies)
+        {
+            var constant = _symbolResolver.TryGetConstant(assembly, fieldName, declaringType);
+            if (constant == null)
+            {
+                continue;
+            }
+
+            var (value, typeName) = constant.Value;
+            string text = value switch
+            {
+                null => "null",
+                string str => $"\"{str}\"",
+                char ch => $"'{ch}'",
+                bool b => b ? "true" : "false",
+                IFormattable formattable => formattable.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
+                _ => value.ToString() ?? "null"
+            };
+
+            LogDebug($"Evaluate result: const {expression} = {text} (from {assembly} metadata)");
+
+            return new EvaluateResult(true, new EvaluateResultData
+            {
+                Value = text,
+                Type = typeName,
+                HasChildren = false,
+                VariablesReference = 0
+            });
+        }
+
+        return null;
+    }
+
     private VariableInfo CreateVariableInfo(RuntimeValue runtimeValue, string defaultName)
     {
         string name = defaultName;
@@ -3805,6 +3866,13 @@ public class DebugBridgeSession : IDisposable
                 }
             }
             
+            // A C# const is inlined by the compiler and never reaches the device: read it from the assembly metadata
+            var constantResult = TryEvaluateConstant(expression, frameId);
+            if (constantResult != null)
+            {
+                return constantResult;
+            }
+
             // Variable not found or no frame specified
             LogDebug($"Evaluate: variable '{expression}' not found");
             await Task.CompletedTask;

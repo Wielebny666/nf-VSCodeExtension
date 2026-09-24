@@ -31,6 +31,8 @@ public interface IPdbReader : IDisposable
 public class SymbolResolver : IDisposable
 {
     private readonly ConcurrentDictionary<string, PdbxFile> _loadedSymbols = new();
+    // Managed .exe/.dll next to each loaded .pdbx, keyed like _loadedSymbols (read for const fields)
+    private readonly ConcurrentDictionary<string, string> _assemblyFiles = new();
     private readonly ConcurrentDictionary<string, IPdbReader> _loadedPdbs = new();
     private readonly ConcurrentDictionary<string, List<SequencePoint>> _sequencePointCache = new();
     private readonly ConcurrentDictionary<string, string[]?> _localVariableNamesCache = new();
@@ -78,6 +80,14 @@ public class SymbolResolver : IDisposable
                 pdbxFile.Initialize();
                 var assemblyKey = pdbxFile.Assembly.FileName ?? pdbxPath;
                 _loadedSymbols[assemblyKey] = pdbxFile;
+
+                var baseName = Path.Combine(Path.GetDirectoryName(pdbxPath) ?? ".", Path.GetFileNameWithoutExtension(pdbxPath));
+                var managedFile = new[] { baseName + ".exe", baseName + ".dll" }.FirstOrDefault(File.Exists);
+                if (managedFile != null)
+                {
+                    _assemblyFiles[assemblyKey] = managedFile;
+                }
+                
                 // Try to load the corresponding PDB file (Portable or Windows)
                 var pdbReader = LoadPdb(pdbxPath);
                 if (pdbReader != null)
@@ -1217,8 +1227,96 @@ public class SymbolResolver : IDisposable
         }
         _loadedPdbs.Clear();
         _loadedSymbols.Clear();
+        _assemblyFiles.Clear();
         _sequencePointCache.Clear();
         _localVariableNamesCache.Clear();
+    }
+
+    /// <summary>
+    /// Look up a C# const field in the assembly's metadata. The compiler inlines constants, so they never exist
+    /// on the device. A constant declared on <paramref name="declaringType"/> wins over same-named ones elsewhere.
+    /// </summary>
+    /// <returns>The constant's value and type name, or null if the assembly has no such constant.</returns>
+    public (object? Value, string TypeName)? TryGetConstant(string assemblyName, string fieldName, string? declaringType)
+    {
+        string? path = null;
+        foreach (var key in new[] { assemblyName, assemblyName + ".exe", assemblyName + ".dll", Path.GetFileNameWithoutExtension(assemblyName) + ".exe", Path.GetFileNameWithoutExtension(assemblyName) + ".dll" })
+        {
+            if (_assemblyFiles.TryGetValue(key, out path))
+            {
+                break;
+            }
+        }
+
+        if (path == null)
+        {
+            return null;
+        }
+
+        try
+        {
+            using var stream = File.OpenRead(path);
+            using var peReader = new System.Reflection.PortableExecutable.PEReader(stream);
+            var metadata = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader(peReader);
+            (object?, string)? fallback = null;
+
+            foreach (var typeHandle in metadata.TypeDefinitions)
+            {
+                var type = metadata.GetTypeDefinition(typeHandle);
+                var typeNamespace = metadata.GetString(type.Namespace);
+                var typeName = metadata.GetString(type.Name);
+                var fullTypeName = typeNamespace.Length > 0 ? $"{typeNamespace}.{typeName}" : typeName;
+
+                foreach (var fieldHandle in type.GetFields())
+                {
+                    var field = metadata.GetFieldDefinition(fieldHandle);
+                    if ((field.Attributes & System.Reflection.FieldAttributes.Literal) == 0 ||
+                        metadata.GetString(field.Name) != fieldName)
+                    {
+                        continue;
+                    }
+
+                    var constant = ReadConstant(metadata, metadata.GetConstant(field.GetDefaultValue()));
+                    if (declaringType != null &&
+                        (fullTypeName == declaringType || fullTypeName.EndsWith("." + declaringType, StringComparison.Ordinal)))
+                    {
+                        return constant;
+                    }
+
+                    fallback ??= constant;
+                }
+            }
+
+            return fallback;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[DebugBridge] TryGetConstant: could not read {path}: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static (object? Value, string TypeName) ReadConstant(System.Reflection.Metadata.MetadataReader metadata, System.Reflection.Metadata.Constant constant)
+    {
+        var reader = metadata.GetBlobReader(constant.Value);
+
+        return constant.TypeCode switch
+        {
+            System.Reflection.Metadata.ConstantTypeCode.Boolean => (reader.ReadBoolean(), "System.Boolean"),
+            System.Reflection.Metadata.ConstantTypeCode.Char => (reader.ReadChar(), "System.Char"),
+            System.Reflection.Metadata.ConstantTypeCode.SByte => (reader.ReadSByte(), "System.SByte"),
+            System.Reflection.Metadata.ConstantTypeCode.Byte => (reader.ReadByte(), "System.Byte"),
+            System.Reflection.Metadata.ConstantTypeCode.Int16 => (reader.ReadInt16(), "System.Int16"),
+            System.Reflection.Metadata.ConstantTypeCode.UInt16 => (reader.ReadUInt16(), "System.UInt16"),
+            System.Reflection.Metadata.ConstantTypeCode.Int32 => (reader.ReadInt32(), "System.Int32"),
+            System.Reflection.Metadata.ConstantTypeCode.UInt32 => (reader.ReadUInt32(), "System.UInt32"),
+            System.Reflection.Metadata.ConstantTypeCode.Int64 => (reader.ReadInt64(), "System.Int64"),
+            System.Reflection.Metadata.ConstantTypeCode.UInt64 => (reader.ReadUInt64(), "System.UInt64"),
+            System.Reflection.Metadata.ConstantTypeCode.Single => (reader.ReadSingle(), "System.Single"),
+            System.Reflection.Metadata.ConstantTypeCode.Double => (reader.ReadDouble(), "System.Double"),
+            System.Reflection.Metadata.ConstantTypeCode.String => (reader.ReadUTF16(reader.Length), "System.String"),
+            _ => (null, "System.Object")
+        };
     }
 
     private void BuildSequencePointCache(PdbxFile pdbxFile, IPdbReader? pdbReader)
