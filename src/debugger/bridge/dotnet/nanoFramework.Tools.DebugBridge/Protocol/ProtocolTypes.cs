@@ -78,6 +78,46 @@ public class BridgeEvent
     public object? Body { get; set; }
 }
 
+#region Exception Info
+
+/// <summary>
+/// Result of the getExceptionInfo command (maps to the DAP exceptionInfo response)
+/// </summary>
+public class ExceptionInfoResult
+{
+    [JsonPropertyName("exceptionId")]
+    public string ExceptionId { get; set; } = string.Empty;
+
+    [JsonPropertyName("description")]
+    public string? Description { get; set; }
+
+    [JsonPropertyName("breakMode")]
+    public string BreakMode { get; set; } = "unhandled";
+
+    [JsonPropertyName("details")]
+    public ExceptionDetailsInfo? Details { get; set; }
+}
+
+/// <summary>
+/// Exception details (maps to DAP ExceptionDetails)
+/// </summary>
+public class ExceptionDetailsInfo
+{
+    [JsonPropertyName("message")]
+    public string? Message { get; set; }
+
+    [JsonPropertyName("typeName")]
+    public string? TypeName { get; set; }
+
+    [JsonPropertyName("fullTypeName")]
+    public string? FullTypeName { get; set; }
+
+    [JsonPropertyName("stackTrace")]
+    public string? StackTrace { get; set; }
+}
+
+#endregion
+
 #region Event Bodies
 
 /// <summary>

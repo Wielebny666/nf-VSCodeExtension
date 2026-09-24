@@ -144,6 +144,9 @@ class Program
                 case "setExceptionHandling":
                     response = await HandleSetExceptionHandling(request);
                     break;
+                case "getExceptionInfo":
+                    response = HandleGetExceptionInfo(request);
+                    break;
                 case "reboot":
                     response = await HandleReboot(request);
                     break;
@@ -540,6 +543,22 @@ class Program
         var args = JsonSerializer.Deserialize<SetExceptionHandlingArgs>(request.Args?.ToString() ?? "{}", _jsonOptions);
         await _session.SetExceptionHandling(args?.BreakOnAll ?? false, args?.BreakOnUncaught ?? true);
         return new BridgeResponse { Id = request.Id, Success = true };
+    }
+
+    private static BridgeResponse HandleGetExceptionInfo(BridgeRequest request)
+    {
+        if (_session == null)
+        {
+            return new BridgeResponse { Id = request.Id, Success = false, Error = "Session not initialized" };
+        }
+
+        var info = _session.GetExceptionInfo();
+        if (info == null)
+        {
+            return new BridgeResponse { Id = request.Id, Success = false, Error = "No exception information available" };
+        }
+
+        return new BridgeResponse { Id = request.Id, Success = true, Data = info };
     }
 
     private static async Task<BridgeResponse> HandleTerminate(BridgeRequest request)
