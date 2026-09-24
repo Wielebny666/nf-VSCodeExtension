@@ -78,7 +78,6 @@ public class SymbolResolver : IDisposable
                 pdbxFile.Initialize();
                 var assemblyKey = pdbxFile.Assembly.FileName ?? pdbxPath;
                 _loadedSymbols[assemblyKey] = pdbxFile;
-                
                 // Try to load the corresponding PDB file (Portable or Windows)
                 var pdbReader = LoadPdb(pdbxPath);
                 if (pdbReader != null)
@@ -1240,11 +1239,6 @@ public class SymbolResolver : IDisposable
                 // Collect method names for logging
                 methodNames.Add($"{cls.Name}::{method.Name}");
                 
-                if (method.ILMap == null || method.ILMap.Length == 0)
-                {
-                    continue;
-                }
-
                 var key = $"{assemblyName}::{method.Token?.NanoCLR:X8}";
                 var sequencePoints = new List<SequencePoint>();
 
@@ -1264,36 +1258,50 @@ public class SymbolResolver : IDisposable
                     }
                 }
 
-                // Build sequence points from IL map, correlating with PDB data
                 bool hasSourceInfo = false;
-                foreach (var il in method.ILMap)
-                {
-                    var sp = new SequencePoint
-                    {
-                        AssemblyName = assemblyName,
-                        MethodName = method.Name,
-                        MethodToken = method.Token?.NanoCLR ?? 0,
-                        ILOffsetCLR = il.CLR,
-                        ILOffsetNanoCLR = il.NanoCLR
-                    };
 
-                    // Try to find source info from PDB
-                    if (pdbSequencePoints != null)
+                if (pdbSequencePoints != null && pdbSequencePoints.Count > 0)
+                {
+                    // One entry per PDB sequence point. The pdbx IL map only lists the offsets where CLR and
+                    // nanoFramework IL diverge (tokens are shorter on the device), so it translates offsets
+                    // rather than naming source locations - and a method without calls has no map at all.
+                    foreach (var pdbSp in pdbSequencePoints)
                     {
-                        // Find the PDB sequence point that matches this CLR IL offset
-                        var pdbSp = FindPdbSequencePointForOffset(pdbSequencePoints, (int)il.CLR);
-                        if (pdbSp != null)
+                        sequencePoints.Add(new SequencePoint
                         {
-                            sp.SourceFile = pdbSp.DocumentPath;
-                            sp.StartLine = pdbSp.StartLine;
-                            sp.StartColumn = pdbSp.StartColumn;
-                            sp.EndLine = pdbSp.EndLine;
-                            sp.EndColumn = pdbSp.EndColumn;
-                            hasSourceInfo = true;
-                        }
+                            AssemblyName = assemblyName,
+                            MethodName = method.Name,
+                            MethodToken = method.Token?.NanoCLR ?? 0,
+                            ILOffsetCLR = (uint)pdbSp.ILOffset,
+                            ILOffsetNanoCLR = method.GetNanoILFromCLRIL((uint)pdbSp.ILOffset),
+                            SourceFile = pdbSp.DocumentPath,
+                            StartLine = pdbSp.StartLine,
+                            StartColumn = pdbSp.StartColumn,
+                            EndLine = pdbSp.EndLine,
+                            EndColumn = pdbSp.EndColumn
+                        });
                     }
 
-                    sequencePoints.Add(sp);
+                    hasSourceInfo = true;
+                }
+                else if (method.ILMap != null && method.ILMap.Length > 0)
+                {
+                    // No source info: keep the IL map offsets so the method is still known
+                    foreach (var il in method.ILMap)
+                    {
+                        sequencePoints.Add(new SequencePoint
+                        {
+                            AssemblyName = assemblyName,
+                            MethodName = method.Name,
+                            MethodToken = method.Token?.NanoCLR ?? 0,
+                            ILOffsetCLR = il.CLR,
+                            ILOffsetNanoCLR = il.NanoCLR
+                        });
+                    }
+                }
+                else
+                {
+                    continue;
                 }
 
                 // Log first method with source info for debugging
@@ -1323,29 +1331,6 @@ public class SymbolResolver : IDisposable
         
         // Log all method names to help debug Main method detection
         Console.Error.WriteLine($"[DebugBridge] {assemblyName} methods: {string.Join(", ", methodNames.Take(20))}{(methodNames.Count > 20 ? "..." : "")}");
-    }
-
-    /// <summary>
-    /// Find the PDB sequence point that matches a CLR IL offset
-    /// </summary>
-    private PdbSequencePoint? FindPdbSequencePointForOffset(List<PdbSequencePoint> points, int clrOffset)
-    {
-        // Find the last sequence point with offset <= clrOffset
-        PdbSequencePoint? best = null;
-        
-        foreach (var sp in points)
-        {
-            if (sp.ILOffset <= clrOffset)
-            {
-                best = sp;
-            }
-            else
-            {
-                break;
-            }
-        }
-
-        return best;
     }
 
     public void Dispose()
