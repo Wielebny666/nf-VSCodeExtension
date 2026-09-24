@@ -554,7 +554,7 @@ export class NuGetManager {
                 const configVersion = migratedPackages.find(candidate => candidate.id.toLowerCase() === pkg.id.toLowerCase())?.version;
                 const escapedPackageId = pkg.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                 const escapedVersion = pkg.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const hintPath = new RegExp(`[/\\\\]packages[/\\\\]${escapedPackageId}\\.${escapedVersion}[/\\\\]lib[/\\\\]`, 'i');
+                const hintPath = new RegExp(`[/\\\\>]packages[/\\\\]${escapedPackageId}\\.${escapedVersion}[/\\\\]lib[/\\\\]`, 'i');
                 if (configVersion !== pkg.version || !hintPath.test(migratedProject)) {
                     throw new Error(`Could not update every ${pkg.id} reference to ${pkg.version}.`);
                 }
@@ -602,7 +602,7 @@ export class NuGetManager {
         // Update version in HintPath: ...\packages\PackageId.OldVersion\lib\... -> ...\packages\PackageId.NewVersion\lib\...
         // Support both backslash and forward slash path separators
         const hintPathRegex = new RegExp(
-            `(<HintPath>[^<]*[/\\\\]packages[/\\\\]${escapedPackageId}\\.)([^/\\\\]+)([/\\\\]lib(?:[/\\\\]netnano1\\.0)?[/\\\\])([^<]+</HintPath>)`,
+            `(<HintPath>(?:[^<]*[/\\\\])?packages[/\\\\]${escapedPackageId}\\.)([^/\\\\]+)([/\\\\]lib(?:[/\\\\]netnano1\\.0)?[/\\\\])([^<]+</HintPath>)`,
             'gi'
         );
 
@@ -617,7 +617,7 @@ export class NuGetManager {
         //        <HintPath>..\packages\PackageId.1.2.3\lib\AssemblyName.dll</HintPath>
         const refBlockRegex = /<Reference\s+Include="[^"]*"[^>]*>[\s\S]*?<\/Reference>/gi;
         const packageHintPathTest = new RegExp(
-            `[/\\\\]packages[/\\\\]${escapedPackageId}\\.[^/\\\\]+[/\\\\]lib(?:[/\\\\]netnano1\\.0)?[/\\\\]`,
+            `[/\\\\>]packages[/\\\\]${escapedPackageId}\\.[^/\\\\]+[/\\\\]lib(?:[/\\\\]netnano1\\.0)?[/\\\\]`,
             'i'
         );
         content = content.replace(refBlockRegex, (match) => {
@@ -711,7 +711,7 @@ export class NuGetManager {
         if (existingRefRegex.test(content)) {
             // Update existing reference version in HintPath (support both / and \ separators)
             const updateRegex = new RegExp(
-                `(<HintPath>[^<]*[/\\\\]packages[/\\\\]${escapedPackageId}\\.)([^/\\\\]+)([/\\\\]lib(?:[/\\\\]netnano1\\.0)?[/\\\\])([^<]+</HintPath>)`,
+                `(<HintPath>(?:[^<]*[/\\\\])?packages[/\\\\]${escapedPackageId}\\.)([^/\\\\]+)([/\\\\]lib(?:[/\\\\]netnano1\\.0)?[/\\\\])([^<]+</HintPath>)`,
                 'gi'
             );
             content = content.replace(updateRegex, (_match, prefix: string, _oldVersion: string, libraryPath: string, tail: string) => {
