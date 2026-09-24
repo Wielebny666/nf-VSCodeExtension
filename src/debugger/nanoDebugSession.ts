@@ -339,12 +339,15 @@ export class NanoDebugSession extends LoggingDebugSession {
         // Set new breakpoints
         const actualBreakpoints = await Promise.all(clientLines.map(async (line) => {
             const bp = await this._runtime.setBreakpoint(sourcePath, this.convertClientLineToDebugger(line));
-            return new Breakpoint(
+            const dapBp = new Breakpoint(
                 bp.verified,
                 this.convertDebuggerLineToClient(bp.line),
                 undefined,
                 new Source(path.basename(sourcePath), sourcePath)
             ) as DebugProtocol.Breakpoint;
+            // Without an id VS Code cannot match the later 'changed' event and the breakpoint stays unverified.
+            dapBp.id = bp.id;
+            return dapBp;
         }));
 
         // Send back the actual breakpoints
