@@ -23,11 +23,18 @@ class Program
     private static DebugBridgeSession? _session;
     private static bool _running = true;
 
+    // stdout carries the JSON protocol only. Anything else written through Console (the debugger library
+    // has stray Console.WriteLine calls, e.g. "The value is N" while deploying) is sent to stderr instead.
+    private static TextWriter _protocolOut = TextWriter.Null;
+    private static readonly object _protocolLock = new();
+
     static async Task Main(string[] args)
     {
         // Set up console for JSON communication
         Console.InputEncoding = System.Text.Encoding.UTF8;
         Console.OutputEncoding = System.Text.Encoding.UTF8;
+        _protocolOut = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
+        Console.SetOut(Console.Error);
 
         _session = new DebugBridgeSession();
         _session.OnEvent += SendEvent;
@@ -636,13 +643,22 @@ class Program
     private static void SendResponse(BridgeResponse response)
     {
         var json = JsonSerializer.Serialize(response, _jsonOptions);
-        Console.WriteLine(json);
+        WriteProtocolLine(json);
     }
 
     private static void SendEvent(object? sender, BridgeEvent evt)
     {
         var json = JsonSerializer.Serialize(evt, _jsonOptions);
-        Console.WriteLine(json);
+        WriteProtocolLine(json);
+    }
+
+    private static void WriteProtocolLine(string json)
+    {
+        // Responses and device events are sent from different threads; keep each line whole
+        lock (_protocolLock)
+        {
+            _protocolOut.WriteLine(json);
+        }
     }
 
     private static void SendError(int requestId, string message)
