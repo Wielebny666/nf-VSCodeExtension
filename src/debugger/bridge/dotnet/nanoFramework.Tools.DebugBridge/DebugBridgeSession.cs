@@ -591,7 +591,7 @@ public class DebugBridgeSession : IDisposable
             LogDebug($"Initial state after resume: {initialState}");
             
             // If still stopped, check if there's a breakpoint hit
-            if (((uint)initialState & 0x80000000) != 0)
+            if (IsStopped(initialState))
             {
                 LogDebug("Device still stopped after resume - checking for breakpoint hit");
                 
@@ -641,8 +641,7 @@ public class DebugBridgeSession : IDisposable
                 // Check execution state
                 var state = _engine.GetExecutionMode();
                 
-                // State.Stopped = 0x80000000
-                if (((uint)state & 0x80000000) != 0)
+                if (IsStopped(state))
                 {
                     LogDebug($"Device stopped (state={state}) - checking breakpoint status");
                     
@@ -1001,7 +1000,7 @@ public class DebugBridgeSession : IDisposable
                 try
                 {
                     var state = _engine.GetExecutionMode();
-                    if ((state & WPCommands.DebuggingExecutionChangeConditions.State.Stopped) != 0)
+                    if (IsStopped(state))
                     {
                         stopped = true;
                         LogDebug($"Device stopped after {(waitCount + 1) * 100}ms");
@@ -1189,7 +1188,7 @@ public class DebugBridgeSession : IDisposable
                 }
                 
                 var state = _engine.GetExecutionMode();
-                if ((state & WPCommands.DebuggingExecutionChangeConditions.State.Stopped) != 0)
+                if (IsStopped(state))
                 {
                     stopped = true;
                     LogDebug($"Device stopped after {(waitCount + 1) * 100}ms");
@@ -1528,7 +1527,7 @@ public class DebugBridgeSession : IDisposable
                             }
                             
                             var state = _engine.GetExecutionMode();
-                            bool isStopped = (state & WPCommands.DebuggingExecutionChangeConditions.State.Stopped) != 0;
+                            bool isStopped = IsStopped(state);
                             
                             if (isStopped)
                             {
@@ -1640,7 +1639,7 @@ public class DebugBridgeSession : IDisposable
                 }
                 
                 var state = _engine.GetExecutionMode();
-                bool isStopped = (state & WPCommands.DebuggingExecutionChangeConditions.State.Stopped) != 0;
+                bool isStopped = IsStopped(state);
                 
                 if (!isStopped)
                 {
@@ -1666,7 +1665,7 @@ public class DebugBridgeSession : IDisposable
                 }
                 
                 var state = _engine.GetExecutionMode();
-                bool isStopped = (state & WPCommands.DebuggingExecutionChangeConditions.State.Stopped) != 0;
+                bool isStopped = IsStopped(state);
                 
                 // Reset error counter on successful call
                 consecutiveErrors = 0;
@@ -1760,7 +1759,7 @@ public class DebugBridgeSession : IDisposable
         for (int i = 0; i < 100; i++) // Up to 10 seconds
         {
             var state = _engine.GetExecutionMode();
-            bool isStopped = (state & WPCommands.DebuggingExecutionChangeConditions.State.Stopped) != 0;
+            bool isStopped = IsStopped(state);
             
             if (isStopped)
             {
@@ -1904,7 +1903,7 @@ public class DebugBridgeSession : IDisposable
         for (int i = 0; i < 100; i++) // Up to 10 seconds
         {
             var state = _engine.GetExecutionMode();
-            bool isStopped = (state & WPCommands.DebuggingExecutionChangeConditions.State.Stopped) != 0;
+            bool isStopped = IsStopped(state);
             
             if (isStopped)
             {
@@ -2058,7 +2057,7 @@ public class DebugBridgeSession : IDisposable
         for (int i = 0; i < 100; i++) // Up to 10 seconds
         {
             var state = _engine.GetExecutionMode();
-            bool isStopped = (state & WPCommands.DebuggingExecutionChangeConditions.State.Stopped) != 0;
+            bool isStopped = IsStopped(state);
             
             if (isStopped)
             {
@@ -2161,7 +2160,7 @@ public class DebugBridgeSession : IDisposable
         for (int i = 0; i < 50; i++) // Up to 5 seconds
         {
             var state = _engine.GetExecutionMode();
-            bool isStopped = (state & WPCommands.DebuggingExecutionChangeConditions.State.Stopped) != 0;
+            bool isStopped = IsStopped(state);
             
             if (isStopped)
             {
@@ -4367,7 +4366,7 @@ public class DebugBridgeSession : IDisposable
             }
             
             var state = _engine.GetExecutionMode();
-            bool isStopped = ((uint)state & 0x80000000) != 0;
+            bool isStopped = IsStopped(state);
             
             if (isStopped)
             {
@@ -4744,7 +4743,7 @@ public class DebugBridgeSession : IDisposable
                 
                 // Check execution state
                 var state = _engine.GetExecutionMode();
-                bool isStopped = (state & WPCommands.DebuggingExecutionChangeConditions.State.Stopped) != 0;
+                bool isStopped = IsStopped(state);
                 LogDebug($"Execution state check {i + 1}/20: stopped={isStopped}, state=0x{(uint)state:X8}");
                 
                 var threads = _engine.GetThreadList();
@@ -4763,7 +4762,7 @@ public class DebugBridgeSession : IDisposable
                     
                     // Verify we're now stopped
                     state = _engine.GetExecutionMode();
-                    isStopped = (state & WPCommands.DebuggingExecutionChangeConditions.State.Stopped) != 0;
+                    isStopped = IsStopped(state);
                     
                     if (isStopped)
                     {
@@ -4830,7 +4829,7 @@ public class DebugBridgeSession : IDisposable
         {
             await Task.Delay(100);
 
-            if ((_engine.GetExecutionMode() & WPCommands.DebuggingExecutionChangeConditions.State.Stopped) != 0)
+            if (IsStopped(_engine.GetExecutionMode()))
             {
                 var status = SelectHit(DrainBreakpointStatus(), hit => (hit.m_flags & WPCommands.Debugging_Execution_BreakpointDef.c_ASSEMBLIES_LOADED) != 0);
                 LogDebug($"CLR stopped after resume: id={status.m_id}, flags=0x{status.m_flags:X4}");
@@ -5021,7 +5020,7 @@ public class DebugBridgeSession : IDisposable
                 LogDebug($"Execution state check {i+1}: {state}");
                 
                 // Check if the Stopped flag is set
-                if (((uint)state & 0x80000000) != 0)  // State.Stopped = 0x80000000
+                if (IsStopped(state))
                 {
                     LogDebug("Device confirmed stopped");
                     break;
@@ -5313,6 +5312,15 @@ public class DebugBridgeSession : IDisposable
         }
 
         return selected;
+    }
+
+    /// <summary>
+    /// Unknown (0xFFFFFFFF) means the state query got no reply; it has the Stopped bit set but must not count as a stop.
+    /// </summary>
+    private static bool IsStopped(WPCommands.DebuggingExecutionChangeConditions.State state)
+    {
+        return state != WPCommands.DebuggingExecutionChangeConditions.State.Unknown
+            && (state & WPCommands.DebuggingExecutionChangeConditions.State.Stopped) != 0;
     }
 
     /// <summary>
