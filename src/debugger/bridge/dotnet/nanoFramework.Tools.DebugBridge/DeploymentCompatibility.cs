@@ -88,15 +88,13 @@ internal static class DeploymentCompatibility
 
     private static string ReadAssemblyName(byte[] data, int assemblyOffset, int totalSize, ushort nameToken, string imagePath)
     {
-        // mscorlib is stored in the shared string table instead of the assembly-local table.
-        if (nameToken == 0xFCD2)
+        // Names that nanoCLR already knows (mscorlib, System.Threading, ...) are stored in the
+        // shared string table instead of the assembly-local table.
+        if (nameToken >= SharedStringTable.FirstToken)
         {
-            return "mscorlib";
-        }
-
-        if (nameToken >= 0xFCA4)
-        {
-            throw new InvalidDataException($"Unsupported shared assembly-name token 0x{nameToken:X4} in '{imagePath}'.");
+            return SharedStringTable.TryGet(nameToken, out var sharedName)
+                ? sharedName
+                : throw new InvalidDataException($"Unsupported shared assembly-name token 0x{nameToken:X4} in '{imagePath}'.");
         }
 
         var stringsOffset = checked((int)BitConverter.ToUInt32(data, assemblyOffset + TablesOffset + StringsTableIndex * sizeof(uint)));

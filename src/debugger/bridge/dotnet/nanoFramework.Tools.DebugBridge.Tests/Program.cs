@@ -10,6 +10,7 @@ var tests = new (string Name, Action Run)[]
     ("mismatched native checksum", MismatchedNativeChecksum),
     ("managed-only assembly", ManagedOnlyAssembly),
     ("concatenated deployment image", ConcatenatedDeploymentImage),
+    ("shared-table assembly names", SharedTableAssemblyNames),
     ("preview v2 assembly", PreviewV2Assembly),
     ("preview v2 JSON symbols", PreviewV2JsonSymbols)
 };
@@ -75,6 +76,17 @@ static void ConcatenatedDeploymentImage()
 
     Assert(assemblies.Length == 2, $"Expected 2 assemblies, found {assemblies.Length}.");
     Assert(assemblies[1].Name == "System.Device.Gpio", assemblies[1].Name);
+}
+
+static void SharedTableAssemblyNames()
+{
+    using var image = CreateImage(
+        ("mscorlib", new Version(1, 17, 11, 0), 0x12345678),
+        ("System.Threading", new Version(1, 1, 52, 0), 0x87654321));
+    var assemblies = DeploymentCompatibility.ReadAssemblies(image.Name).ToArray();
+
+    Assert(assemblies[0].Name == "mscorlib", assemblies[0].Name);
+    Assert(assemblies[1].Name == "System.Threading", assemblies[1].Name);
 }
 
 static void PreviewV2Assembly()
@@ -146,7 +158,14 @@ static TemporaryImage CreateImageFile(
         BitConverter.GetBytes((ushort)assembly.Version.Minor).CopyTo(data, versionOffset + 2);
         BitConverter.GetBytes((ushort)assembly.Version.Build).CopyTo(data, versionOffset + 4);
         BitConverter.GetBytes((ushort)assembly.Version.Revision).CopyTo(data, versionOffset + 6);
-        BitConverter.GetBytes((ushort)0).CopyTo(data, assemblyNameOffset);
+        // names the CLR already knows are referenced through its shared string table
+        var nameToken = assembly.Name switch
+        {
+            "mscorlib" => (ushort)0xFCD2,
+            "System.Threading" => (ushort)0xFE28,
+            _ => (ushort)0
+        };
+        BitConverter.GetBytes(nameToken).CopyTo(data, assemblyNameOffset);
         BitConverter.GetBytes((uint)120).CopyTo(data, 40 + 11 * sizeof(uint));
         BitConverter.GetBytes((uint)data.Length).CopyTo(data, 40 + 15 * sizeof(uint));
         Encoding.UTF8.GetBytes(assembly.Name).CopyTo(data, 120);
