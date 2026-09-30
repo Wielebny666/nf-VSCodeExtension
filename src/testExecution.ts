@@ -133,7 +133,8 @@ export async function buildTestProject(
 
     const nfProjSysPath = nfProjectSystemPath(extensionPath, projectPath);
     const restore = resolveRestoreTarget(projectPath);
-    const previewWslBuild = Executor.shouldUseWsl('test') && nfProjSysPath.includes('/v2.0/');
+    // v2 projects need a C# 13 compiler that mono's msbuild lacks, so non-Windows builds use dotnet msbuild.
+    const dotnetMsBuild = (os.platform() !== 'win32' || Executor.shouldUseWsl('test')) && nfProjSysPath.includes('/v2.0/');
 
     // Locate MSBuild
     let msbuildExe: string;
@@ -147,7 +148,7 @@ export async function buildTestProject(
         }
         msbuildExe = found;
     } else {
-        msbuildExe = previewWslBuild ? 'dotnet' : 'msbuild';
+        msbuildExe = dotnetMsBuild ? 'dotnet' : 'msbuild';
     }
 
     if (token?.isCancellationRequested) { return false; }
@@ -183,11 +184,11 @@ export async function buildTestProject(
 
     // MSBuild arguments as an array — avoids shell interpolation (CodeQL js/shell-command-constructed-from-input)
     const msbuildArgs = [
-        ...(previewWslBuild ? ['msbuild'] : []),
+        ...(dotnetMsBuild ? ['msbuild'] : []),
         projectPath,
         `-p:Configuration=${configuration}`,
         `-p:NanoFrameworkProjectSystemPath=${nfProjSysPath}`,
-        ...(previewWslBuild
+        ...(dotnetMsBuild
             ? [`-p:NF_MDP_MSBUILDTASK_PATH=${path.join(nfProjSysPath, 'mdp', 'net8.0').replace(/\\/g, '/')}`]
             : Executor.shouldUseWsl('test') ? ['-p:LangVersion=latest'] : []),
         '-p:NFMDP_PE_Verbose=false',
